@@ -45,21 +45,6 @@ struct Request {
 }
 
 #[derive(Debug)]
-enum Method {
-    Shutdown,
-    Initialize(InitializeParams),
-    Hover(HoverParams),
-    GotoDef(TextDocumentPositionParams),
-    FindAllRef(ReferenceParams),
-    Symbols(DocumentSymbolParams),
-    Complete(TextDocumentPositionParams),
-    CompleteResolve(CompletionItem),
-    Rename(RenameParams),
-    Reformat(DocumentFormattingParams),
-    ReformatRange(DocumentRangeFormattingParams),
-}
-
-#[derive(Debug)]
 enum Notification {
     CancelRequest(usize),
     Change(ChangeParams),
@@ -100,119 +85,119 @@ serializable_enum!(ResponseData,
     HoverSuccess(HoverSuccessContents)
 );
 
-// FIXME(45) generate this function.
-fn parse_message(input: &str) -> Result<ServerMessage, ParseError>  {
-    let ls_command: serde_json::Value = serde_json::from_str(input).unwrap();
+macro_rules! messages_internal {
+    // arg is actually a 0-1 repetition
+    ($ls_command: ident $params: ident
+     [$str: pat => method $name: ident $(($arg: ty))*; $($rest: tt)*]
+     [$($method: tt)*]
+     [$($fun: tt)*]) => {
+        messages_internal!($ls_command $params [$($rest)*] [
+            $($method)*
+            $name$(($arg))*,
+        ] [
+            $($fun)*
+            $str => {
+                let id = $ls_command.lookup("id").unwrap().as_u64().unwrap() as usize;
+                Ok(ServerMessage::Request(Request{id: id, method: Method::$name$((params!($arg)))* }))
+            }
+        ]);
+    };
+    ($ls_command: ident $params: ident
+     [$str: pat => notification $name: ident($arg: expr); $($rest: tt)*]
+     [$($method: tt)*]
+     [$($fun: tt)*]) => {
+        messages_internal!($ls_command $params [$($rest)*] [$($method)*] [
+            $($fun)*
+                $str => {
+                    Ok(ServerMessage::Notification(Notification::$name($arg)))
+                }
+        ]);
+    };
+    ($ls_command: ident $params: ident
+     [$str: pat => err $e: expr; $($rest: tt)*]
+     [$($method: tt)*]
+     [$($fun: tt)*]) => {
+        messages_internal!($ls_command $params [$($rest)*] [$($method)*] [
+            $($fun)*
+            $str => {
+                macro_rules! id {
+                    () => (($ls_command.lookup("id").map(|id| id.as_u64().unwrap() as usize)));
+                }
+                Err($e)
+            }
+        ]);
+    };
+    ($ls_command: ident $params: ident
+     [] [$($method: tt)*] [$($arms: tt)*]) => {
+        #[derive(Debug)]
+        enum Method {
+            $($method)*
+        }
+        fn parse_message(input: &str) -> Result<ServerMessage, ParseError>  {
+            let $ls_command: serde_json::Value = serde_json::from_str(input).unwrap();
 
-    let params = ls_command.lookup("params");
+            let $params = $ls_command.lookup("params");
 
-    if let Some(v) = ls_command.lookup("method") {
-        if let Some(name) = v.as_str() {
-            match name {
-                "shutdown" => {
-                    let id = ls_command.lookup("id").unwrap().as_u64().unwrap() as usize;
-                    Ok(ServerMessage::Request(Request{id: id, method: Method::Shutdown }))
+            macro_rules! params {
+                ($ty: ty) => ({
+                    let method: $ty =
+                        serde_json::from_value($params.unwrap().to_owned()).unwrap();
+                    method
+                });
+            }
+
+            if let Some(v) = $ls_command.lookup("method") {
+                if let Some(name) = v.as_str() {
+                    match name {
+                        $($arms)*
+                    }
+                } else {
+                    let id = $ls_command.lookup("id").map(|id| id.as_u64().unwrap() as usize);
+                    Err(ParseError::new(ErrorKind::InvalidData, "Method is not a string", id))
                 }
-                "initialize" => {
-                    let id = ls_command.lookup("id").unwrap().as_u64().unwrap() as usize;
-                    let method: InitializeParams =
-                        serde_json::from_value(params.unwrap().to_owned()).unwrap();
-                    Ok(ServerMessage::Request(Request{id: id, method: Method::Initialize(method)}))
-                }
-                "textDocument/hover" => {
-                    let id = ls_command.lookup("id").unwrap().as_u64().unwrap() as usize;
-                    let method: HoverParams =
-                        serde_json::from_value(params.unwrap().to_owned()).unwrap();
-                    Ok(ServerMessage::Request(Request{id: id, method: Method::Hover(method)}))
-                }
-                "textDocument/didChange" => {
-                    let method: ChangeParams =
-                        serde_json::from_value(params.unwrap().to_owned()).unwrap();
-                    Ok(ServerMessage::Notification(Notification::Change(method)))
-                }
-                "textDocument/didOpen" => {
-                    // TODO handle me
-                    Err(ParseError::new(ErrorKind::InvalidData, "didOpen", None))
-                }
-                "textDocument/definition" => {
-                    let id = ls_command.lookup("id").unwrap().as_u64().unwrap() as usize;
-                    let method: TextDocumentPositionParams =
-                        serde_json::from_value(params.unwrap().to_owned()).unwrap();
-                    Ok(ServerMessage::Request(Request{id: id, method: Method::GotoDef(method)}))
-                }
-                "textDocument/references" => {
-                    let id = ls_command.lookup("id").unwrap().as_u64().unwrap() as usize;
-                    let method: ReferenceParams =
-                        serde_json::from_value(params.unwrap().to_owned()).unwrap();
-                    Ok(ServerMessage::Request(Request{id: id, method: Method::FindAllRef(method)}))
-                }
-                "textDocument/completion" => {
-                    let id = ls_command.lookup("id").unwrap().as_u64().unwrap() as usize;
-                    let method: TextDocumentPositionParams =
-                        serde_json::from_value(params.unwrap().to_owned()).unwrap();
-                    Ok(ServerMessage::Request(Request{id: id, method: Method::Complete(method)}))
-                }
-                "completionItem/resolve" => {
-                    // currently, we safely ignore this as a pass-through since we fully handle
-                    // textDocument/completion.  In the future, we may want to use this method as a
-                    // way to more lazily fill out completion information
-                    let id = ls_command.lookup("id").unwrap().as_u64().unwrap() as usize;
-                    let method: CompletionItem =
-                        serde_json::from_value(params.unwrap().to_owned()).unwrap();
-                    Ok(ServerMessage::Request(Request{id: id, method: Method::CompleteResolve(method)}))
-                }
-                "textDocument/documentSymbol" => {
-                    let id = ls_command.lookup("id").unwrap().as_u64().unwrap() as usize;
-                    let method: DocumentSymbolParams =
-                        serde_json::from_value(params.unwrap().to_owned()).unwrap();
-                    Ok(ServerMessage::Request(Request{id: id, method: Method::Symbols(method)}))
-                }
-                "textDocument/rename" => {
-                    let id = ls_command.lookup("id").unwrap().as_u64().unwrap() as usize;
-                    let method: RenameParams =
-                        serde_json::from_value(params.unwrap().to_owned()).unwrap();
-                    Ok(ServerMessage::Request(Request{id: id, method: Method::Rename(method)}))
-                }
-                "textDocument/formatting" => {
-                    let id = ls_command.lookup("id").unwrap().as_u64().unwrap() as usize;
-                    let params: DocumentFormattingParams =
-                        serde_json::from_value(params.unwrap().to_owned()).unwrap();
-                    Ok(ServerMessage::Request(Request{id: id, method: Method::Reformat(params)}))
-                }
-                "textDocument/rangeFormatting" => {
-                    let id = ls_command.lookup("id").unwrap().as_u64().unwrap() as usize;
-                    let params: DocumentRangeFormattingParams =
-                        serde_json::from_value(params.unwrap().to_owned()).unwrap();
-                    Ok(ServerMessage::Request(Request{id: id, method: Method::ReformatRange(params)}))
-                }
-                "$/cancelRequest" => {
-                    let params: CancelParams = serde_json::from_value(params.unwrap().to_owned())
-                                               .unwrap();
-                    Ok(ServerMessage::Notification(Notification::CancelRequest(params.id)))
-                }
-                "$/setTraceNotification" => {
-                    // TODO handle me
-                    Err(ParseError::new(ErrorKind::InvalidData, "setTraceNotification", None))
-                }
-                "workspace/didChangeConfiguration" => {
-                    // TODO handle me
-                    Err(ParseError::new(ErrorKind::InvalidData, "didChangeConfiguration", None))
-                }
-                _ => {
-                    let id = ls_command.lookup("id").map(|id| id.as_u64().unwrap() as usize);
-                    Err(ParseError::new(ErrorKind::InvalidData, "Unknown command", id))
-                }
+            } else {
+                let id = $ls_command.lookup("id").map(|id| id.as_u64().unwrap() as usize);
+                Err(ParseError::new(ErrorKind::InvalidData, "Method not found", id))
             }
         }
-        else {
-            let id = ls_command.lookup("id").map(|id| id.as_u64().unwrap() as usize);
-            Err(ParseError::new(ErrorKind::InvalidData, "Method is not a string", id))
-        }
-    }
-    else {
-        let id = ls_command.lookup("id").map(|id| id.as_u64().unwrap() as usize);
-        Err(ParseError::new(ErrorKind::InvalidData, "Method not found", id))
-    }
+    };
+}
+
+// Generates the Method enum and parse_message function.
+macro_rules! messages {
+    ($($x: tt)*) => {
+        // thread through the `ls_command` and `params` idents so that messages_internal!
+        // refers to a consistent ident (satisfies hygiene)
+        messages_internal!(ls_command params [$($x)*] [] []);
+    };
+}
+
+messages! {
+    "shutdown" => method Shutdown;
+    "initialize" => method Initialize(InitializeParams);
+    "textDocument/hover" => method Hover(HoverParams);
+    "textDocument/didChange" => notification Change(params!(ChangeParams));
+    // TODO handle me
+    "textDocument/didOpen" => err ParseError::new(ErrorKind::InvalidData, "didOpen", None);
+    "textDocument/definition" => method GotoDef(TextDocumentPositionParams);
+    "textDocument/references" => method FindAllRef(ReferenceParams);
+    "textDocument/completion" => method Complete(TextDocumentPositionParams);
+    // currently, we safely ignore this as a pass-through since we fully handle
+    // textDocument/completion.  In the future, we may want to use this method as a
+    // way to more lazily fill out completion information
+    "completionItem/resolve" => method CompleteResolve(CompletionItem);
+    "textDocument/documentSymbol" => method Symbols(DocumentSymbolParams);
+    "textDocument/rename" => method Rename(RenameParams);
+    "textDocument/formatting" => method Reformat(DocumentFormattingParams);
+    "textDocument/rangeFormatting" => method ReformatRange(DocumentRangeFormattingParams);
+    "$/cancelRequest" => notification CancelRequest(params!(CancelParams).id);
+    // TODO handle me
+    "$/setTraceNotification" => err ParseError::new(ErrorKind::InvalidData, "setTraceNotification", None);
+    // TODO handle me
+    "workspace/didChangeConfiguration" => err ParseError::new(ErrorKind::InvalidData, "didChangeConfiguration", None);
+    _ => err {
+        ParseError::new(ErrorKind::InvalidData, "Unknown command", id!())
+    };
 }
 
 pub struct LsService {
@@ -229,7 +214,7 @@ pub enum ServerStateChange {
     Break,
 }
 
-impl LsService {    
+impl LsService {
     pub fn new(analysis: Arc<AnalysisHost>,
                vfs: Arc<Vfs>,
                build_queue: Arc<BuildQueue>,
